@@ -80,11 +80,12 @@ public:
 
 class AmpStage : public SignalProcessor {
 protected:
-  const float AUDIO_SAMPLE_RATE_EXACT;
+  const float fs;
   BiquadFilter* filter;
 public:
-  AmpStage(float sr) : AUDIO_SAMPLE_RATE_EXACT(sr) {
+  AmpStage(float sr) : fs(sr) {
     filter = BiquadFilter::create(sr);
+    setGain(0.5);
   }
     static inline float calcPoleFreq (float a, float b, float c)
     {
@@ -114,8 +115,8 @@ public:
 
     // frequency warping
     const float wc = calcPoleFreq (a0s, a1s, a2s);
-    const auto K = wc == 0.0f ? 2.0f * AUDIO_SAMPLE_RATE_EXACT
-      : wc / tan (wc / (2.0f * AUDIO_SAMPLE_RATE_EXACT));
+    const auto K = wc == 0.0f ? 2.0f * fs
+      : wc / tanf (wc / (2.0f * fs));
     const auto KSq = K * K;
 
     // bilinear transform
@@ -136,11 +137,12 @@ public:
 
 class OutputBuffer : public SignalProcessor {
 protected:
-  const float AUDIO_SAMPLE_RATE_EXACT;
+  const float fs;
   BiquadFilter* filter;
 public:
-  OutputBuffer(float sr) : AUDIO_SAMPLE_RATE_EXACT(sr) {
+  OutputBuffer(float sr) : fs(sr) {
     filter = BiquadFilter::create(sr);
+    setLevel(0.5);
   }
   void setLevel(float level) {
     float* coefficients = filter->getCoefficients();
@@ -156,7 +158,7 @@ public:
     const auto a1s = 1.0f;
 
     // bilinear transform
-    const auto K = 2.0f * AUDIO_SAMPLE_RATE_EXACT;
+    const auto K = 2.0f * fs;
     const auto a0 = a0s * K + a1s;
 
     /* b0 */ coefficients[0] = ( b0s * K + b1s) / a0;
@@ -175,11 +177,12 @@ public:
 
 class ToneControl : public SignalProcessor {
 protected:
-  const float AUDIO_SAMPLE_RATE_EXACT;
+  const float fs;
   BiquadFilter* filter;
 public:
-  ToneControl(float sr) : AUDIO_SAMPLE_RATE_EXACT(sr) {
+  ToneControl(float sr) : fs(sr) {
     filter = BiquadFilter::create(sr);
+    setTreble(0.4);
   }
   void setTreble (float treble) {
     float* coefficients = filter->getCoefficients();
@@ -192,7 +195,7 @@ public:
     constexpr float G4 = 1.0f / (float) 100e3;
 
     constexpr float wc = G1 / C; // frequency to match
-    const auto K = wc / tan (wc / (2.0f * AUDIO_SAMPLE_RATE_EXACT)); // frequency warp to match transition freq
+    const auto K = wc / tanf (wc / (2.0f * fs)); // frequency warp to match transition freq
 
     // analog coefficients
     const auto b0s = C * (G1 + G2);
@@ -221,19 +224,8 @@ public:
   }
 };
 
-// AudioConnection patchpreAmp (inputBuffer, 0, preAmpStage, 0);
-// AudioConnection patchAmp (preAmpStage, 0, ampStage, 0);
-// AudioConnection patchClipping (ampStage, 0, clippingStage, 0);
-// AudioConnection patchFF2 (inputBuffer, 0, ff2, 0);
-// AudioConnection sum0 (ff1, 0, mixer, 0);
-// AudioConnection sum1 (clippingStage, 0, mixer, 1);
-// AudioConnection sum2 (ff2, 0, mixer, 2);
-// AudioConnection patchSummingAmp (mixer, 0, summingAmp, 0);
-// AudioConnection patchTone (summingAmp, 0, toneControl, 0);
-
 class ChowCentaurPatch : public Patch {
 protected:
-  const float AUDIO_SAMPLE_RATE_EXACT;
   // common processors
   InputBuffer* inputBuffer;
   ToneControl* toneControl;
@@ -250,7 +242,7 @@ protected:
   FloatArray buf2;
   AudioBuffer* buf3;
 public:
-  ChowCentaurPatch() : AUDIO_SAMPLE_RATE_EXACT(getSampleRate()) {
+  ChowCentaurPatch() {
     registerParameter(PARAMETER_A, "Gain");
     registerParameter(PARAMETER_B, "Treble");
     registerParameter(PARAMETER_C, "Level");
@@ -286,8 +278,9 @@ public:
     float gain = getParameterValue(PARAMETER_A);
     float treble = getParameterValue(PARAMETER_B);
     float level = getParameterValue(PARAMETER_C);
-    toneControl->setTreble(treble);
-    outputBuffer->setLevel(level);
+    gain = treble = level = 0.5;
+    // toneControl->setTreble(treble);
+    // outputBuffer->setLevel(level);
 
     preAmpStage->setGain(gain);
     ampStage->setGain(gain);
@@ -296,19 +289,24 @@ public:
     FloatArray in = buffer.getSamples(LEFT_CHANNEL);
     inputBuffer->process(in, in);
 
-    // inputBuffer > preAmpStage>ampStage > clippingStage > mixer
+    // // inputBuffer > preAmpStage > ampStage > clippingStage > mixer
     preAmpStage->process(buffer, *buf3);
-    ampStage->process(buf3->getSamples(0), buf1);
-    clippingStage->process(buf1, buf1);
-    // inputBuffer > ff2 > mixer
+    ampStage->process(buf3->getSamples(0), buf2);
+    clippingStage->process(buf2, buf1);
+    
+    // // inputBuffer > ff2 > mixer
     ff2->process(in, buf2);
     buf1.add(buf2);
+
     // ff1 > mixer
     FloatArray ff1current = buf3->getSamples(1);
     buf1.add(ff1current);
-    // mixer > summingAmp > toneControl
-    summingAmp->process(buf1, buf1);
-    toneControl->process(buf1, in);
-    // buffer.getSamples(RIGHT_CHANNEL).copyFrom(in);
+
+    // mixer > summingAmp > toneControl > outputBuffer > amp
+    summingAmp->process(buf1, in);
+    toneControl->process(in, in);
+    outputBuffer->process(in, in);
+    in.multiply(0.5); // 4x gain for USE_ML
+    buffer.getSamples(RIGHT_CHANNEL).copyFrom(in);
   }
 };
